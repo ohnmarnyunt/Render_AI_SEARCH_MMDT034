@@ -1,0 +1,387 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Myanmar Search Visualizer</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    body { font-family: sans-serif; margin: 0; display: flex; height: 100vh; }
+    #sidebar { width: 320px; padding: 16px; overflow-y: auto; box-sizing: border-box; border-right: 1px solid #ccc; }
+    #map { flex: 1; }
+    label { display: block; margin-top: 12px; font-weight: bold; }
+    select, button { width: 100%; padding: 8px; margin-top: 4px; box-sizing: border-box; font-size: 14px; }
+    button { margin-top: 16px; background: #2563eb; color: white; border: none; cursor: pointer; font-weight: bold; border-radius: 4px; padding: 10px; }
+    #buttonRow { display: flex; gap: 8px; margin-top: 16px; }
+    #buttonRow button { width: auto; flex: 1; margin-top: 0; }
+    #graphSummary { margin-top: 20px; padding: 12px; background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 6px; font-size: 13px; }
+    #graphSummary h4 { margin: 0 0 6px 0; font-size: 12px; text-transform: uppercase; color: #166534; }
+    #graphSummary p { margin: 2px 0; }
+    #graphSummary .legend { margin-top: 10px; padding-top: 8px; border-top: 1px solid #bbf7d0; }
+    #graphSummary .legendRow { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+    #graphSummary .legendSwatch { flex-shrink: 0; }
+    #graphSummary .legendLine { display: inline-block; width: 20px; height: 3px; border-radius: 2px; }
+    #graphSummary .legendCircle {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 16px; height: 16px; border-radius: 50%;
+      background: #fdba74; border: 2px solid #f97316;
+      font-size: 9px; font-weight: bold; color: #7c2d12;
+    }
+    #quickSearchButton { background: #059669; }
+    #results { margin-top: 20px; padding: 12px; background: #f3f4f6; border-radius: 6px; font-size: 14px; }
+    #results p { margin: 4px 0; }
+    #status { color: #b91c1c; font-weight: bold; }
+    #conceptNote { margin-top: 12px; padding: 12px; background: #eef2ff; border: 1px solid #c7d2fe; border-radius: 6px; font-size: 13px; }
+    #conceptNote h3 { margin: 0 0 8px 0; font-size: 15px; color: #1e3a8a; }
+    #conceptNote h4 { margin: 8px 0 2px 0; font-size: 12px; text-transform: uppercase; color: #4338ca; }
+    #conceptNote p { margin: 0 0 4px 0; line-height: 1.4; }
+    #explorationTrace { margin-top: 20px; padding: 12px; background: #fff7ed; border: 1px solid #fed7aa; border-radius: 6px; font-size: 13px; }
+    #explorationTrace h4 { margin: 0 0 6px 0; font-size: 13px; color: #9a3412; text-transform: uppercase; }
+    #explorationTrace ol { margin: 0; padding-left: 20px; }
+    #explorationTrace li { margin: 2px 0; }
+    #explorationTrace .edgeCount { margin: 8px 0 0 0; font-weight: bold; color: #9a3412; }
+    /* the step number shown directly on the orange marker while tracing */
+    .exploration-number {
+      background: transparent;
+      border: none;
+      box-shadow: none;
+      font-weight: bold;
+      font-size: 11px;
+      color: #7c2d12;
+    }
+    .exploration-number::before { display: none; }
+    /* per-leg distance shown inline in the final path breakdown */
+    .legDistance { color: #6b7280; font-style: italic; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div id="sidebar">
+    <h2>Myanmar Search Visualizer</h2>
+
+    <label for="source">Source</label>
+    <select id="source"></select>
+
+    <label for="destination">Destination</label>
+    <select id="destination"></select>
+
+    <label for="algorithm">Algorithm</label>
+    <select id="algorithm">
+      <option value="bfs">BFS</option>
+      <option value="dfs">DFS</option>
+      <option value="ucs">UCS</option>
+      <option value="ids">IDS</option>
+      <option value="greedy">Greedy Best-First Search</option>
+      <option value="astar">A*</option>
+    </select>
+
+    <div id="buttonRow">
+      <button id="visualizeButton">Visualize</button>
+      <button id="quickSearchButton">Search</button>
+    </div>
+
+    <div id="graphSummary"></div>
+
+    <div id="explorationTrace"></div>
+    <div id="results"></div>
+
+    <div id="conceptNote"></div>
+  </div>
+
+  <div id="map"></div>
+
+  <script>
+    // 1. Set up the map, centered roughly on Myanmar.
+    const map = L.map('map').setView([19.5, 96.5], 6);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    let allLocations = {};
+    let pathLine = null;
+
+    const CONCEPT_NOTES = {
+      bfs: {
+        title: "BFS (Breadth-First Search)",
+        mainIdea: "Explores the graph level by level - it visits every location one road-hop away before moving on to locations two hops away, and so on.",
+        nodeSelection: "Expands the oldest node still waiting in line (a plain FIFO queue) - whichever location it reached first is explored first.",
+        infoUsed: "Depth only (how many hops from the source). It ignores real road distance entirely, so it finds the path with the fewest stops, not the shortest or cheapest one."
+      },
+      dfs: {
+        title: "DFS (Depth-First Search)",
+        mainIdea: "Dives as deep as possible down one path before backtracking to try another - like exploring a maze by always taking the next unexplored turn.",
+        nodeSelection: "Expands the most recently discovered node still waiting (a LIFO stack) - the opposite order from BFS.",
+        infoUsed: "Depth only, same as BFS. It ignores real road distance and any heuristic, so the path it finds is often neither the fewest stops nor the cheapest route."
+      },
+      ucs: {
+        title: "UCS (Uniform Cost Search)",
+        mainIdea: "Always expands whichever unfinished path currently has the lowest total real road distance travelled so far, guaranteeing the cheapest route is found.",
+        nodeSelection: "Expands the node with the lowest cumulative path cost g(n), using a priority queue (min-heap) instead of a plain queue.",
+        infoUsed: "Path cost only - g(n), the actual road distance travelled so far. No heuristic is used."
+      },
+      ids: {
+        title: "IDS (Iterative Deepening Search)",
+        mainIdea: "Repeats a depth-limited DFS with an increasing depth limit (0, then 1, then 2, ...) until the goal is found - combining DFS's low memory use with BFS's guarantee of finding the fewest-hops path.",
+        nodeSelection: "Same order as DFS (deepest available node first), but any branch beyond the current depth limit is cut off and re-tried on the next round.",
+        infoUsed: "Depth only, same as BFS/DFS. It deliberately re-does earlier work at each new depth limit instead of remembering it, trading extra computation for much less memory."
+      },
+      greedy: {
+        title: "Greedy Best-First Search",
+        mainIdea: "Always jumps toward whichever unvisited location looks closest to the destination in a straight line, without caring how far it has already travelled.",
+        nodeSelection: "Expands the node with the lowest heuristic value h(n), using a priority queue sorted purely by h(n).",
+        infoUsed: "Heuristic only - h(n), the straight-line (haversine) distance to the goal. Because it ignores real road cost, it can be fooled into a longer real route if the straight-line-closest city has poor road connections."
+      },
+      astar: {
+        title: "A* Search",
+        mainIdea: "Combines the actual cost from the start with an estimated cost to the goal, balancing UCS's guarantee of correctness with Greedy's speed.",
+        nodeSelection: "Expands the node with the lowest f(n) = g(n) + h(n).",
+        infoUsed: "Combination of path cost and heuristic: g(n) = actual road distance from the source, h(n) = estimated straight-line distance to the destination."
+      }
+    };
+
+    function updateConceptNote(algorithmKey) {
+      const note = CONCEPT_NOTES[algorithmKey];
+      const box = document.getElementById('conceptNote');
+      if (!note) { box.innerHTML = ''; return; }
+      box.innerHTML = `
+        <h3>${note.title}</h3>
+        <h4>Main Idea</h4>
+        <p>${note.mainIdea}</p>
+        <h4>Node Selection</h4>
+        <p>${note.nodeSelection}</p>
+        <h4>Information Used</h4>
+        <p>${note.infoUsed}</p>
+      `;
+    }
+
+    // Show the note for whichever algorithm is selected right now, and again every time the user picks a different one.
+    const algorithmSelect = document.getElementById('algorithm');
+    updateConceptNote(algorithmSelect.value);
+    algorithmSelect.addEventListener('change', () => {
+      updateConceptNote(algorithmSelect.value);
+    });
+
+    // Loads locations and graph data together, then displays city pins, the road network, and the summary box.
+    Promise.all([
+      fetch('/api/locations').then(response => response.json()),
+      fetch('/api/graph_summary').then(response => response.json())
+    ]).then(([locations, summary]) => {
+      allLocations = locations;
+
+      document.getElementById('graphSummary').innerHTML = `
+        <h4>Graph summary</h4>
+        <p><b>Total Cities Configured:</b> ${summary.total_cities}</p>
+        <p><b>Total Connection Edges:</b> ${summary.total_edges}</p>
+        <div class="legend">
+          <div class="legendRow">
+            <img class="legendSwatch" src="https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png" width="12" height="20" alt="">
+            <span> City</span>
+          </div>
+          <div class="legendRow">
+            <span class="legendSwatch legendLine" style="background:#a855f7;"></span>
+            <span> Edge</span>
+          </div>
+          <div class="legendRow">
+            <span class="legendSwatch legendLine" style="background:red;"></span>
+            <span> Real road (after Search or Visualize)</span>
+          </div>
+          <div class="legendRow">
+            <span class="legendSwatch legendCircle">1</span>
+            <span> Explored order (Visualize only)</span>
+          </div>
+        </div>
+      `;
+
+      // Draws each real road connection once as a permanent straight-line graph overlay.
+      summary.edges.forEach(([cityA, cityB]) => {
+        const locA = locations[cityA];
+        const locB = locations[cityB];
+        if (!locA || !locB) return;
+        L.polyline([[locA.lat, locA.lon], [locB.lat, locB.lon]], {
+          color: '#a855f7',
+          weight: 2,
+          opacity: 0.5
+        }).addTo(map);
+      });
+
+      const sourceSelect = document.getElementById('source');
+      const destinationSelect = document.getElementById('destination');
+      const names = Object.keys(locations).sort();
+
+      for (const name of names) {
+        const loc = locations[name];
+
+        sourceSelect.add(new Option(name, name));
+        destinationSelect.add(new Option(name, name));
+
+        const marker = L.marker([loc.lat, loc.lon]).addTo(map);
+        marker.bindPopup(`<b>${name}</b><br>${loc.region}`);
+      }
+
+      // sensible defaults so the page isn't empty on first load
+      sourceSelect.value = "Yangon";
+      destinationSelect.value = "Bagan";
+    });
+
+    // Visualize animates the search process, while Search displays only the final result using the same backend response.
+    function runSearch(onResult) {
+      const source = document.getElementById('source').value;
+      const destination = document.getElementById('destination').value;
+      const algorithm = document.getElementById('algorithm').value;
+
+      fetch('/api/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source, destination, algorithm })
+      })
+        .then(response => response.json())
+        .then(onResult)
+        .catch(error => {
+          document.getElementById('results').innerHTML = `<p id="status">Request failed: ${error}</p>`;
+        });
+    }
+
+    document.getElementById('visualizeButton').addEventListener('click', () => {
+      runSearch(showResultAnimated);
+    });
+
+    document.getElementById('quickSearchButton').addEventListener('click', () => {
+      runSearch(showResultInstant);
+    });
+
+    // Animates the search process by showing each expanded city in order with a short delay.
+    const EXPLORATION_STEP_DELAY_MS = 350;
+    let explorationMarkers = [];
+    let explorationTimeoutId = null;
+
+    function clearExploration() {
+      if (explorationTimeoutId) {
+        clearTimeout(explorationTimeoutId);
+        explorationTimeoutId = null;
+      }
+      explorationMarkers.forEach(marker => map.removeLayer(marker));
+      explorationMarkers = [];
+    }
+
+    function animateExploration(explorationOrder, explorationDistances, onDone) {
+      const traceDiv = document.getElementById('explorationTrace');
+      traceDiv.innerHTML = '<h4>Step-by-step exploration order</h4><ol id="explorationList"></ol>';
+      const listEl = document.getElementById('explorationList');
+
+      let i = 0;
+      function stepOnce() {
+        if (i >= explorationOrder.length) {
+          onDone();
+          return;
+        }
+
+        const name = explorationOrder[i];
+        const distanceSoFar = explorationDistances[i];
+        const loc = allLocations[name];
+        if (loc) {
+          const marker = L.circleMarker([loc.lat, loc.lon], {
+            radius: 10,
+            color: '#f97316',
+            weight: 2,
+            fillColor: '#fdba74',
+            fillOpacity: 0.9
+          }).addTo(map);
+
+          marker.bindTooltip(String(i + 1), {
+            permanent: true,
+            direction: 'center',
+            className: 'exploration-number'
+          });
+          marker.bindPopup(`<b>${i + 1}. ${name}</b> - ${distanceSoFar.toFixed(1)} km travelled so far`);
+          explorationMarkers.push(marker);
+        }
+
+        const li = document.createElement('li');
+        li.textContent = `${name} (${distanceSoFar.toFixed(1)} km)`;
+        listEl.appendChild(li);
+
+        i += 1;
+        explorationTimeoutId = setTimeout(stepOnce, EXPLORATION_STEP_DELAY_MS);
+      }
+      stepOnce();
+    }
+
+    // Clears the previous route, stops old animations, removes markers, and resets both output panels before a new search.
+    function resetOutputPanels() {
+      if (pathLine) {
+        map.removeLayer(pathLine);
+        pathLine = null;
+      }
+      clearExploration();
+      document.getElementById('results').innerHTML = '';
+      document.getElementById('explorationTrace').innerHTML = '';
+    }
+
+    function handleErrorOrNoPath(data) {
+      const resultsDiv = document.getElementById('results');
+      if (data.error) {
+        resultsDiv.innerHTML = `<p id="status">Error: ${data.error}</p>`;
+        return true;
+      }
+      if (!data.path) {
+        resultsDiv.innerHTML = `<p id="status">${data.message}</p>`;
+        return true;
+      }
+      return false;
+    }
+
+    // "Visualize" - animates the step-by-step exploration on the map first, then draws the final route once the animation finishes.
+    function showResultAnimated(data) {
+      resetOutputPanels();
+      if (handleErrorOrNoPath(data)) return;
+
+      const traceDiv = document.getElementById('explorationTrace');
+      animateExploration(data.exploration_order, data.exploration_distances, () => {
+        traceDiv.insertAdjacentHTML(
+          'beforeend',
+          `<p class="edgeCount">Total edges evaluated: ${data.edges_evaluated}</p>`
+        );
+        drawFinalResult(data);
+      });
+    }
+
+    // "Search" - just show the answer: skips the animation and the step-by-step trace entirely, and draws the final route right away.
+    function showResultInstant(data) {
+      resetOutputPanels();
+      if (handleErrorOrNoPath(data)) return;
+
+      drawFinalResult(data);
+    }
+
+    // Builds the path names with the real road distance of each hop shown between them.
+    function buildPathWithDistances(path, legDistances) {
+      let html = path[0];
+      for (let i = 0; i < legDistances.length; i++) {
+        html += ` &rarr; <span class="legDistance">${legDistances[i]} km</span> &rarr; ${path[i + 1]}`;
+      }
+      return html;
+    }
+
+    // Draws the final route and displays the path, cost, and nodes-expanded summary after the animation finishes.
+    function drawFinalResult(data) {
+      const resultsDiv = document.getElementById('results');
+
+      // Prefer the real, curving road shape if we have it; fall back to straight lines between cities if geometry wasn't available.
+      const latlngs = (data.route_geometry && data.route_geometry.length > 0)
+        ? data.route_geometry
+        : data.path.map(name => [allLocations[name].lat, allLocations[name].lon]);
+      pathLine = L.polyline(latlngs, { color: 'red', weight: 4 }).addTo(map);
+      map.fitBounds(pathLine.getBounds(), { padding: [40, 40] });
+
+      resultsDiv.innerHTML = `
+        <p><b>Algorithm:</b> ${data.algorithm}</p>
+        <p><b>Source:</b> ${data.source}</p>
+        <p><b>Destination:</b> ${data.destination}</p>
+        <p><b>Path:</b> ${buildPathWithDistances(data.path, data.leg_distances)}</p>
+        <p><b>Path count:</b> ${data.path.length} cities</p>
+        <p><b>Total cost:</b> ${data.cost} km</p>
+        <p><b>Nodes expanded:</b> ${data.nodes_expanded}</p>
+      `;
+    }
+  </script>
+</body>
+</html>
